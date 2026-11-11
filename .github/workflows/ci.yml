@@ -1,0 +1,130 @@
+# Continuous integration.
+#
+# Every push and pull request. The evaluation gate runs here at DEV thresholds,
+# so a prompt change that breaks routing is visible in the pull request rather
+# than discovered during a release.
+#
+# Nothing in this workflow needs Azure. The offline backend executes the policy
+# declared in the prompt file, which means CI is free, deterministic, and
+# requires no credentials.
+
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest -q
+
+  manifest:
+    name: Validate agent manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: Manifest must be loadable and the model version pinned
+        run: python scripts/validate_manifest.py agent/agent.yaml
+
+  evaluate:
+    name: Evaluation gate (dev thresholds)
+    runs-on: ubuntu-latest
+    needs: [ test, manifest ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      # Exits non-zero when any gated metric is below its threshold, which
+      # fails the check and blocks the merge.
+      - name: Run gate
+        id: gate
+        run: python -m evals.run_gate --manifest agent/agent.yaml --env dev
+        env:
+          PYTHONPATH: src
+
+      - name: Upload evaluation artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-dev-${{ github.sha }}
+          path: evals/_runs/
+          retention-days: 30
+
+      - name: Comment the gate report on the pull request
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const root = 'evals/_runs';
+            if (!fs.existsSync(root)) return;
+            const dirs = fs.readdirSync(root);
+            if (dirs.length === 0) return;
+            const report = path.join(root, dirs[0], 'gate-report.md');
+            if (!fs.existsSync(report)) return;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: fs.readFileSync(report, 'utf8'),
+            });
+
+  infra:
+    name: Validate infrastructure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Bicep
+        run: |
+          curl -fsSL -o bicep https://github.com/Azure/bicep/releases/latest/download/bicep-linux-x64
+          chmod +x bicep && sudo mv bicep /usr/local/bin/bicep
+          bicep --version
+
+      - name: Compile templates
+        run: bicep build infra/main.bicep --stdout > /dev/null
+
+      - name: Compile parameter files
+        run: |
+          for env in dev acceptance prod; do
+            bicep build-params "infra/env/${env}.bicepparam" --stdout > /dev/null
+            echo "${env}: ok"
+          done
+
+      - name: Private networking is mandatory outside dev
+        run: bash scripts/check_networking_params.sh

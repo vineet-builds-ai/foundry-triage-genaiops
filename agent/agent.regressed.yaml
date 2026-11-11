@@ -1,0 +1,32 @@
+# The promotion artefact. One version of this file is what moves from dev to
+# acceptance to production -- not a branch, not a container tag.
+schema_version: 1
+
+name: ticket-triage
+version: 4
+description: >
+  Classifies an inbound support ticket into one queue and one priority,
+  with the output contract and fallback policy trimmed down.
+
+prompt:
+  file: prompts/system.v4-regressed.md
+
+model:
+  deployment: gpt-4o-mini
+  api_version: "2025-04-01-preview"
+  temperature: 0.0
+  max_output_tokens: 400
+  response_format: json_object
+
+# No tools: triage is a pure classification step. Keeping the tool surface
+# empty is a deliberate security property, and a change here is a change that
+# needs review.
+tools: []
+
+runtime:
+  timeout_seconds: 30
+  max_retries: 2
+
+evaluation:
+  dataset: ../evals/datasets/tickets.golden.jsonl
+  thresholds_dir: ../evals/thresholds

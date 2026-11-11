@@ -1,0 +1,300 @@
+# Promotion pipeline.
+#
+# One pinned agent version moves dev -> acceptance -> production. The version
+# is resolved once, at the start, and every later job refers to that same
+# release id. Nothing is rebuilt between environments, so what production runs
+# is bit-for-bit what acceptance approved.
+#
+# Approvals and who may approve them are configured per environment under
+# Settings > Environments in the repository, not in this file. That is
+# deliberate: a developer editing this workflow cannot grant themselves the
+# right to release to production.
+#
+# Azure authentication uses OIDC federated credentials. There is no client
+# secret in this repository and none to rotate.
+
+name: CD
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'agent/**'
+      - 'src/**'
+      - 'evals/**'
+      - 'infra/**'
+      - '.github/workflows/cd.yml'
+  workflow_dispatch:
+    inputs:
+      manifest:
+        description: 'Agent manifest to promote'
+        default: 'agent/agent.yaml'
+        required: true
+
+permissions:
+  contents: read
+  id-token: write   # Required for OIDC. No secrets needed.
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false   # Never cancel a release mid-flight.
+
+env:
+  MANIFEST: ${{ github.event.inputs.manifest || 'agent/agent.yaml' }}
+  PYTHONPATH: src
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Resolve the thing being promoted, once.
+  # ---------------------------------------------------------------------------
+  resolve:
+    name: Resolve agent version
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.id.outputs.release_id }}
+      prompt_sha: ${{ steps.id.outputs.prompt_sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: Validate manifest
+        run: python scripts/validate_manifest.py "$MANIFEST"
+
+      - name: Pin release id
+        id: id
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import os, sys
+          sys.path.insert(0, "src")
+          from triage.manifest import load_manifest
+          m = load_manifest(os.environ["MANIFEST"])
+          print(f"release_id={m.release_id}")
+          print(f"prompt_sha={m.prompt_sha256}")
+          PY
+
+      - name: Record what is being promoted
+        run: |
+          {
+            echo "### Promoting \`${{ steps.id.outputs.release_id }}\`"
+            echo ""
+            echo "- Manifest: \`$MANIFEST\`"
+            echo "- Prompt sha256: \`${{ steps.id.outputs.prompt_sha }}\`"
+            echo "- Commit: \`${{ github.sha }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  validate-infra:
+    name: Validate infrastructure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Bicep
+        run: |
+          curl -fsSL -o bicep https://github.com/Azure/bicep/releases/latest/download/bicep-linux-x64
+          chmod +x bicep && sudo mv bicep /usr/local/bin/bicep
+      - run: bicep build infra/main.bicep --stdout > /dev/null
+      - run: bash scripts/check_networking_params.sh
+
+  # ---------------------------------------------------------------------------
+  # Dev.
+  # ---------------------------------------------------------------------------
+  dev:
+    name: Deploy and gate -- dev
+    runs-on: ubuntu-latest
+    needs: [ resolve, validate-infra ]
+    environment:
+      name: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy infrastructure
+        run: |
+          az deployment group create \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --template-file infra/main.bicep \
+            --parameters infra/env/dev.bicepparam \
+            --name "triage-dev-${{ github.run_number }}"
+        env:
+          DEVELOPER_GROUP_OBJECT_ID: ${{ vars.DEVELOPER_GROUP_OBJECT_ID }}
+          CICD_PRINCIPAL_ID: ${{ vars.CICD_PRINCIPAL_ID }}
+
+      - name: Evaluation gate -- dev thresholds
+        run: python -m evals.run_gate --manifest "$MANIFEST" --env dev
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gate-dev-${{ needs.resolve.outputs.release_id }}
+          path: evals/_runs/
+
+  # ---------------------------------------------------------------------------
+  # Acceptance. The business bar, and a human sign-off.
+  # ---------------------------------------------------------------------------
+  acceptance:
+    name: Deploy and gate -- acceptance
+    runs-on: ubuntu-latest
+    needs: [ resolve, dev ]
+    environment:
+      name: acceptance   # Protection rules live in repo settings.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: What-if against acceptance
+        run: |
+          az deployment group what-if \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --template-file infra/main.bicep \
+            --parameters infra/env/acceptance.bicepparam \
+            --no-pretty-print > whatif.json
+        env:
+          PRIVATE_ENDPOINT_SUBNET_ID: ${{ vars.PRIVATE_ENDPOINT_SUBNET_ID }}
+          CONTAINER_APPS_SUBNET_ID: ${{ vars.CONTAINER_APPS_SUBNET_ID }}
+          DNS_ZONE_COGNITIVESERVICES: ${{ vars.DNS_ZONE_COGNITIVESERVICES }}
+          DNS_ZONE_OPENAI: ${{ vars.DNS_ZONE_OPENAI }}
+          DNS_ZONE_AISERVICES: ${{ vars.DNS_ZONE_AISERVICES }}
+          CICD_PRINCIPAL_ID: ${{ vars.CICD_PRINCIPAL_ID }}
+
+      - name: Deploy infrastructure
+        run: |
+          az deployment group create \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --template-file infra/main.bicep \
+            --parameters infra/env/acceptance.bicepparam \
+            --name "triage-acc-${{ github.run_number }}"
+        env:
+          PRIVATE_ENDPOINT_SUBNET_ID: ${{ vars.PRIVATE_ENDPOINT_SUBNET_ID }}
+          CONTAINER_APPS_SUBNET_ID: ${{ vars.CONTAINER_APPS_SUBNET_ID }}
+          DNS_ZONE_COGNITIVESERVICES: ${{ vars.DNS_ZONE_COGNITIVESERVICES }}
+          DNS_ZONE_OPENAI: ${{ vars.DNS_ZONE_OPENAI }}
+          DNS_ZONE_AISERVICES: ${{ vars.DNS_ZONE_AISERVICES }}
+          CICD_PRINCIPAL_ID: ${{ vars.CICD_PRINCIPAL_ID }}
+
+      # The promotion bar. Cloud evaluation runs here when a project endpoint
+      # is configured, which adds the LLM-judge and content-safety evaluators
+      # on top of the deterministic ones.
+      - name: Evaluation gate -- acceptance thresholds
+        run: python -m evals.run_gate --manifest "$MANIFEST" --env acceptance
+        env:
+          FOUNDRY_PROJECT_ENDPOINT: ${{ vars.FOUNDRY_PROJECT_ENDPOINT_ACCEPTANCE }}
+          FOUNDRY_MODEL_DEPLOYMENT: ${{ vars.FOUNDRY_MODEL_DEPLOYMENT }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gate-acceptance-${{ needs.resolve.outputs.release_id }}
+          path: evals/_runs/
+
+  # ---------------------------------------------------------------------------
+  # Production. Re-gate, canary, then full.
+  # ---------------------------------------------------------------------------
+  production:
+    name: Deploy and gate -- production
+    runs-on: ubuntu-latest
+    needs: [ resolve, acceptance ]
+    environment:
+      name: production   # Required reviewers configured in repo settings.
+      url: ${{ steps.deploy.outputs.fqdn }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Re-run the acceptance bar against the same pinned version immediately
+      # before release. A version that would not pass today does not ship
+      # today, even if it passed last week.
+      - name: Pre-flight gate
+        run: python -m evals.run_gate --manifest "$MANIFEST" --env prod
+
+      - name: Deploy infrastructure
+        id: deploy
+        run: |
+          az deployment group create \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --template-file infra/main.bicep \
+            --parameters infra/env/prod.bicepparam \
+            --name "triage-prod-${{ github.run_number }}" \
+            --query 'properties.outputs.triageApiFqdn.value' -o tsv \
+            | tee fqdn.txt
+          echo "fqdn=https://$(cat fqdn.txt)" >> "$GITHUB_OUTPUT"
+        env:
+          PRIVATE_ENDPOINT_SUBNET_ID: ${{ vars.PRIVATE_ENDPOINT_SUBNET_ID }}
+          CONTAINER_APPS_SUBNET_ID: ${{ vars.CONTAINER_APPS_SUBNET_ID }}
+          DNS_ZONE_COGNITIVESERVICES: ${{ vars.DNS_ZONE_COGNITIVESERVICES }}
+          DNS_ZONE_OPENAI: ${{ vars.DNS_ZONE_OPENAI }}
+          DNS_ZONE_AISERVICES: ${{ vars.DNS_ZONE_AISERVICES }}
+          CICD_PRINCIPAL_ID: ${{ vars.CICD_PRINCIPAL_ID }}
+
+      - name: Shift 10 percent of traffic to the new revision
+        run: bash scripts/canary.sh 10
+        env:
+          RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          CONTAINER_APP: ${{ vars.PROD_CONTAINER_APP }}
+
+      - name: Watch the canary
+        run: bash scripts/watch_canary.sh
+        env:
+          RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          CONTAINER_APP: ${{ vars.PROD_CONTAINER_APP }}
+          APPLICATION_INSIGHTS_APP_ID: ${{ vars.APPLICATION_INSIGHTS_APP_ID }}
+
+      - name: Shift all traffic to the new revision
+        run: bash scripts/canary.sh 100
+        env:
+          RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          CONTAINER_APP: ${{ vars.PROD_CONTAINER_APP }}
+
+      - name: Roll back on failure
+        if: failure()
+        run: bash scripts/canary.sh 0
+        env:
+          RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          CONTAINER_APP: ${{ vars.PROD_CONTAINER_APP }}
+
+      - name: Release record
+        if: always()
+        run: |
+          {
+            echo "### Production release"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Agent version | \`${{ needs.resolve.outputs.release_id }}\` |"
+            echo "| Prompt sha256 | \`${{ needs.resolve.outputs.prompt_sha }}\` |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            echo "| Approved by | ${{ github.actor }} |"
+            echo "| Outcome | ${{ job.status }} |"
+          } >> "$GITHUB_STEP_SUMMARY"

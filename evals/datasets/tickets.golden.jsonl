@@ -1,0 +1,49 @@
+{"ticket_id": "SEC-001", "text": "We received an email claiming to be from your billing team asking for card details. I think it is a phishing attempt targeting our staff.", "expected_queue": "security-incident", "expected_priority": "P1", "note": "phishing, worded like a billing query"}
+{"ticket_id": "SEC-002", "text": "Our admin account shows a login from an IP in another country at 3am. I think someone else accessed my account.", "expected_queue": "security-incident", "expected_priority": "P1", "note": "worded like an access problem"}
+{"ticket_id": "SEC-003", "text": "One of our developers accidentally committed an API key to a public repo. The credential is for your platform.", "expected_queue": "security-incident", "expected_priority": "P1", "note": "leaked credential"}
+{"ticket_id": "SEC-004", "text": "I believe our tenant has been compromised. Several users report mailbox rules they did not create.", "expected_queue": "security-incident", "expected_priority": "P1", "note": "account takeover"}
+{"ticket_id": "SEC-005", "text": "A customer list exported from your dashboard appeared on a paste site. This looks like a data leak.", "expected_queue": "security-incident", "expected_priority": "P1", "note": "data exposure"}
+{"ticket_id": "SEC-006", "text": "Your support agent asked me to install a remote tool and now my machine is showing ransomware warnings.", "expected_queue": "security-incident", "expected_priority": "P1", "note": "malware, possible social engineering"}
+{"ticket_id": "SEC-007", "text": "We got an alert that unauthorized access was attempted against our API tokens.", "expected_queue": "security-incident", "expected_priority": "P1", "note": "intrusion attempt"}
+{"ticket_id": "SEC-008", "text": "Someone is attempting to exfiltrate records through the reporting API.", "expected_queue": "security-incident", "expected_priority": "P1", "note": "data exfiltration"}
+{"ticket_id": "OUT-001", "text": "The entire platform is down for our whole organisation. Nothing loads.", "expected_queue": "technical-support", "expected_priority": "P1"}
+{"ticket_id": "OUT-002", "text": "API returns 500 error on every request since 09:00 UTC.", "expected_queue": "technical-support", "expected_priority": "P1"}
+{"ticket_id": "OUT-003", "text": "We cannot connect to the EU endpoint at all.", "expected_queue": "technical-support", "expected_priority": "P1"}
+{"ticket_id": "OUT-004", "text": "Service down since the maintenance window and all users affected.", "expected_queue": "technical-support", "expected_priority": "P1"}
+{"ticket_id": "OUT-005", "text": "Total failure of the webhook delivery system.", "expected_queue": "technical-support", "expected_priority": "P1"}
+{"ticket_id": "BIL-001", "text": "We were charged twice for the November invoice.", "expected_queue": "billing", "expected_priority": "P2"}
+{"ticket_id": "BIL-002", "text": "Please issue a refund for the duplicate subscription.", "expected_queue": "billing", "expected_priority": "P2"}
+{"ticket_id": "BIL-003", "text": "Our payment failed but the card is valid.", "expected_queue": "billing", "expected_priority": "P2"}
+{"ticket_id": "BIL-004", "text": "The invoice is missing our VAT number.", "expected_queue": "billing", "expected_priority": "P2"}
+{"ticket_id": "BIL-005", "text": "We think we were overcharged for seats we removed in October.", "expected_queue": "billing", "expected_priority": "P2"}
+{"ticket_id": "BIL-006", "text": "Can you send a copy of the billing statement for Q3?", "expected_queue": "billing", "expected_priority": "P2"}
+{"ticket_id": "BIL-007", "text": "Credit card on file needs updating before renewal.", "expected_queue": "billing", "expected_priority": "P2"}
+{"ticket_id": "ACC-001", "text": "I am locked out after too many attempts.", "expected_queue": "account-access", "expected_priority": "P2"}
+{"ticket_id": "ACC-002", "text": "MFA device was replaced and I cannot sign in.", "expected_queue": "account-access", "expected_priority": "P2"}
+{"ticket_id": "ACC-003", "text": "Need a password reset for our service account.", "expected_queue": "account-access", "expected_priority": "P2"}
+{"ticket_id": "ACC-004", "text": "2FA codes are rejected every time.", "expected_queue": "account-access", "expected_priority": "P2"}
+{"ticket_id": "ACC-005", "text": "New starter cannot access my account settings page.", "expected_queue": "account-access", "expected_priority": "P2"}
+{"ticket_id": "ACC-006", "text": "Login loop after SSO change.", "expected_queue": "account-access", "expected_priority": "P2"}
+{"ticket_id": "FEA-001", "text": "Please add dark mode to the dashboard.", "expected_queue": "feature-request", "expected_priority": "P4"}
+{"ticket_id": "FEA-002", "text": "Feature request: bulk export as parquet.", "expected_queue": "feature-request", "expected_priority": "P4"}
+{"ticket_id": "FEA-003", "text": "It would be nice to schedule reports weekly.", "expected_queue": "feature-request", "expected_priority": "P4"}
+{"ticket_id": "FEA-004", "text": "Suggestion: allow per-team retention settings.", "expected_queue": "feature-request", "expected_priority": "P4"}
+{"ticket_id": "FEA-005", "text": "Is a Terraform provider on the roadmap?", "expected_queue": "feature-request", "expected_priority": "P4"}
+{"ticket_id": "TEC-001", "text": "The search results page is slow with large datasets.", "expected_queue": "technical-support", "expected_priority": "P3"}
+{"ticket_id": "TEC-002", "text": "Found a bug in the CSV importer, it drops the last row.", "expected_queue": "technical-support", "expected_priority": "P3"}
+{"ticket_id": "TEC-003", "text": "Date picker is broken in Safari.", "expected_queue": "technical-support", "expected_priority": "P3"}
+{"ticket_id": "TEC-004", "text": "Export fails silently for reports over 10k rows.", "expected_queue": "technical-support", "expected_priority": "P3"}
+{"ticket_id": "TEC-005", "text": "Minor glitch: tooltip text overlaps the icon.", "expected_queue": "technical-support", "expected_priority": "P3"}
+{"ticket_id": "TEC-006", "text": "Error when saving a dashboard with more than 20 widgets.", "expected_queue": "technical-support", "expected_priority": "P3"}
+{"ticket_id": "TEC-007", "text": "Notifications not working since last release.", "expected_queue": "technical-support", "expected_priority": "P3"}
+{"ticket_id": "TEC-008", "text": "Chart rendering crash on Firefox 141.", "expected_queue": "technical-support", "expected_priority": "P3"}
+{"ticket_id": "AMB-001", "text": "Following up on my previous conversation with your team.", "expected_queue": "triage-review", "expected_priority": "P3", "note": "no actionable signal"}
+{"ticket_id": "AMB-002", "text": "Please see the attached document and advise.", "expected_queue": "triage-review", "expected_priority": "P3", "note": "no actionable signal"}
+{"ticket_id": "AMB-003", "text": "As discussed on the call yesterday, can you confirm next steps?", "expected_queue": "triage-review", "expected_priority": "P3", "note": "no actionable signal"}
+{"ticket_id": "AMB-004", "text": "It is still happening.", "expected_queue": "triage-review", "expected_priority": "P3", "note": "no actionable signal"}
+{"ticket_id": "AMB-005", "text": "Our procurement team has questions about the renewal terms.", "expected_queue": "triage-review", "expected_priority": "P3", "note": "commercial, not billing operations"}
+{"ticket_id": "AMB-006", "text": "Can someone from your side join our Thursday sync?", "expected_queue": "triage-review", "expected_priority": "P3", "note": "no actionable signal"}
+{"ticket_id": "HRD-001", "text": "Our monthly charge jumped after we added users, but nobody on the account can log in to check.", "expected_queue": "billing", "expected_priority": "P2", "note": "two intents, billing is primary"}
+{"ticket_id": "HRD-002", "text": "The report shows an error, and separately we would like you to please add a CSV option.", "expected_queue": "technical-support", "expected_priority": "P3", "note": "defect plus request, defect is primary"}
+{"ticket_id": "HRD-003", "text": "Nothing loads on the billing page for one user.", "expected_queue": "technical-support", "expected_priority": "P3", "note": "single user, not an outage"}
+{"ticket_id": "HRD-004", "text": "Can you confirm whether the password policy supports 16 characters?", "expected_queue": "technical-support", "expected_priority": "P3", "note": "product question, not an access problem"}

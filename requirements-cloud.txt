@@ -1,0 +1,5 @@
+# Only needed when running against a real Microsoft Foundry project.
+-r requirements.txt
+azure-identity>=1.19
+azure-ai-projects>=2.0.0b1
+openai>=1.60

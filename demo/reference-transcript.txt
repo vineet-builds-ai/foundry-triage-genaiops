@@ -1,0 +1,189 @@
+This is the committed output of `make demo`, captured so the result is
+visible without running anything. Regenerate with:
+
+    NO_COLOR=1 python3 demo/run_demo.py > demo/reference-transcript.txt
+
+----------------------------------------------------------------------
+
+
+  Evaluation-gated promotion for an AI product on Azure
+  Support ticket triage agent -- offline demo, no Azure account needed
+
+==========================================================================
+ 1/4  The change a reviewer sees
+==========================================================================
+
+Someone tidies the triage prompt. Three edits, all reasonable-sounding:
+  - trim an unused field from the output contract
+  - fold the security rule into the general rules, one less special case
+  - stop sending tickets to triage-review, it was a dumping ground
+
+--- system.v3.md
++++ system.v4-regressed.md
+@@ -1,3 +1,3 @@
+ ---
+-version: 3
++version: 4
+ ---
+@@ -12,6 +12,4 @@
+ 
+-FIELDS: ticket_id, queue, priority, category, needs_human_review, rationale
++FIELDS: ticket_id, queue, priority, category, rationale
+ 
+-`needs_human_review` is a boolean. Set it to true whenever you did not match a
+-specific routing rule, so that a person sees the ticket before it is actioned.
+ `rationale` is one short sentence naming why this queue was chosen.
+@@ -31,3 +29,2 @@
+ 
+-RULE: breach|phishing|phish|credential|leaked|unauthorized access|unauthorised access|malware|ransomware|hacked|compromised|data leak|exfiltrat|suspicious login|someone else accessed -> security-incident | P1
+ RULE: outage|is down|service down|500 error|cannot connect|all users affected|total failure|nothing loads -> technical-support | P1
+@@ -40,11 +37,2 @@
+ 
+-If no rule above matched, do not guess a destination. Route the ticket for
+-human triage and say so.
+-
+-FALLBACK: triage-review | P3 | needs_human_review=true
+-
+-## Why the fallback matters
+-
+-A confidently mis-routed ticket is worse than an unrouted one. An unrouted
+-ticket waits in a queue a person is watching; a mis-routed ticket silently
+-enters the wrong workflow with the wrong service-level clock running.
++Always assign the most plausible queue. Avoid leaving tickets unrouted.
+
+==========================================================================
+ 2/4  Static check: does the manifest still hold together?
+==========================================================================
+
+--- shipping: agent/agent.yaml
+manifest        : agent.yaml
+agent           : ticket-triage v3
+release id      : ticket-triage-v3-7bcccbd59556
+prompt          : system.v3.md (v3)
+prompt sha256   : 7bcccbd59556fcd5ff2f804b335a0607fcbea7b9bb2fc027f626e0c3a5704893
+model           : gpt-4o-mini
+routing rules   : 6
+fallback policy : declared
+tools           : none
+
+Manifest OK.
+  -> accepted
+
+--- regressed: agent/agent.regressed.yaml
+manifest        : agent.regressed.yaml
+agent           : ticket-triage v4
+release id      : ticket-triage-v4-3e14c54472a3
+prompt          : system.v4-regressed.md (v4)
+prompt sha256   : 3e14c54472a3f635b3a137b4a4ac4451efb27718db2582e42da064df003fcc59
+model           : gpt-4o-mini
+routing rules   : 5
+fallback policy : ABSENT
+tools           : none
+
+FAILED with 2 problem(s):
+  - the prompt's output contract disagrees with the code schema: missing ['needs_human_review']
+  - no fallback policy declared; without one the agent guesses a destination for tickets that match no rule instead of deferring to human triage
+  -> rejected (exit 1)
+
+This check costs milliseconds and runs on every pull request. It already
+rejects the change. The gate below shows what it would have cost us.
+
+==========================================================================
+ 3/4  Evaluation gate at the acceptance bar
+==========================================================================
+
+--- shipping: agent/agent.yaml
+Agent version    : ticket-triage-v3-7bcccbd59556
+Prompt           : system.v3.md (v3)
+Routing rules    : 6
+Fallback policy  : declared
+Backend          : local-policy
+Target env       : acceptance
+======= Run Summary =======
+Run name: "routing_20261111_071149_844067"
+Run status: "Completed"
+Start time: "2026-11-11 07:11:49.844067+00:00"
+====================================================
+
+
+==============================================================
+  schema_validity          >= 1.00    1.000   PASS
+  critical_queue_recall    >= 1.00    1.000   PASS
+  routing_accuracy         >= 0.85    0.939   PASS
+  priority_accuracy        >= 0.85    0.939   PASS
+==============================================================
+
+GATE PASSED. ticket-triage-v3-7bcccbd59556 may be promoted to acceptance.
+Report: evals/_runs/ticket-triage-v3-7bcccbd59556-acceptance/gate-report.md
+
+--- regressed: agent/agent.regressed.yaml
+Agent version    : ticket-triage-v4-3e14c54472a3
+Prompt           : system.v4-regressed.md (v4)
+Routing rules    : 5
+Fallback policy  : ABSENT
+Backend          : local-policy
+Target env       : acceptance
+======= Run Summary =======
+Run name: "routing_20261111_071153_664071"
+Run status: "Completed"
+Start time: "2026-11-11 07:11:53.664071+00:00"
+====================================================
+
+
+==============================================================
+  schema_validity          >= 1.00    0.000   FAIL
+  critical_queue_recall    >= 1.00    0.000   FAIL
+  routing_accuracy         >= 0.85    0.653   FAIL
+  priority_accuracy        >= 0.85    0.775   FAIL
+==============================================================
+
+  8 critical-queue ticket(s) mis-routed:
+    SEC-001: security-incident -> billing
+    SEC-002: security-incident -> account-access
+    SEC-003: security-incident -> technical-support
+    SEC-004: security-incident -> technical-support
+    SEC-005: security-incident -> technical-support
+    SEC-006: security-incident -> technical-support
+    SEC-007: security-incident -> technical-support
+    SEC-008: security-incident -> technical-support
+
+GATE BLOCKED. ticket-triage-v4-3e14c54472a3 will not be promoted to acceptance.
+Failed: schema_validity, critical_queue_recall, routing_accuracy, priority_accuracy
+Report: evals/_runs/ticket-triage-v4-3e14c54472a3-acceptance/gate-report.md
+
+
+==========================================================================
+ 4/4  Side by side
+==========================================================================
+
+  metric                      bar       v3       v4   verdict
+  ------------------------ ------ -------- --------   ------------------
+  schema_validity            1.00    1.000    0.000   BREACHED
+  critical_queue_recall      1.00    1.000    0.000   BREACHED
+  routing_accuracy           0.85    0.939    0.653   BREACHED
+  priority_accuracy          0.85    0.939    0.775   BREACHED
+
+  8 security tickets were sent somewhere else:
+    SEC-001  security-incident -> billing
+    SEC-002  security-incident -> account-access
+    SEC-003  security-incident -> technical-support
+    SEC-004  security-incident -> technical-support
+    SEC-005  security-incident -> technical-support
+    SEC-006  security-incident -> technical-support
+    SEC-007  security-incident -> technical-support
+    SEC-008  security-incident -> technical-support
+
+==========================================================================
+  v3 promoted to acceptance. v4 blocked before it got there.
+  No customer saw v4. No incident review. One failed check.
+==========================================================================
+
+Artefacts written to demo/output/
+  demo/output/gate-regressed.txt
+  demo/output/gate-report-regressed.md
+  demo/output/gate-report-shipping.md
+  demo/output/gate-shipping.txt
+  demo/output/prompt-change.diff
+  demo/output/static-check-regressed.txt
+  demo/output/static-check-shipping.txt
+

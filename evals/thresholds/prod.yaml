@@ -1,0 +1,19 @@
+environment: prod
+description: >
+  Production re-runs the acceptance bar against the same pinned agent version
+  immediately before the canary. It is not a second, looser check: a version
+  that would not pass acceptance today does not reach production today, even
+  if it passed last week.
+metrics:
+  schema_validity:
+    min: 1.0
+    rationale: Zero tolerance, as in acceptance.
+  critical_queue_recall:
+    min: 1.0
+    rationale: Zero tolerance, as in acceptance.
+  routing_accuracy:
+    min: 0.85
+    rationale: Identical to acceptance by design.
+  priority_accuracy:
+    min: 0.85
+    rationale: Identical to acceptance by design.

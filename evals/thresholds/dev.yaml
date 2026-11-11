@@ -1,0 +1,21 @@
+environment: dev
+description: >
+  Smoke thresholds. Loose enough that an engineer mid-experiment is not
+  blocked, strict enough that a broken build is caught before review.
+metrics:
+  schema_validity:
+    min: 1.0
+    rationale: >
+      A malformed decision breaks the downstream router. There is no
+      environment in which this is acceptable, so it is gated everywhere.
+  routing_accuracy:
+    min: 0.70
+    rationale: Catches a wholesale policy break, not a few points of drift.
+  critical_queue_recall:
+    min: 0.90
+    rationale: >
+      Slightly below the production bar so an engineer sees the number moving
+      before the pull request, but high enough to fail a removed rule.
+  priority_accuracy:
+    min: 0.70
+    rationale: Smoke level only.

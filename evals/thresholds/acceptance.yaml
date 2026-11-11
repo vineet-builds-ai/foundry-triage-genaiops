@@ -1,0 +1,29 @@
+environment: acceptance
+description: >
+  The promotion bar. These are the numbers the business signed off, and the
+  values are set just below the measured baseline of the shipping version so
+  that real decay fails the gate while ordinary noise does not.
+metrics:
+  schema_validity:
+    min: 1.0
+    rationale: >
+      Zero tolerance. A decision that does not satisfy the output contract
+      enters the wrong workflow with the wrong service-level clock running.
+  critical_queue_recall:
+    min: 1.0
+    rationale: >
+      Zero tolerance. A mis-routed security ticket is the failure this whole
+      pipeline exists to prevent. Measured only over rows whose expected
+      queue is security-incident, so it cannot be averaged away by the other
+      forty-one rows.
+  routing_accuracy:
+    min: 0.85
+    rationale: >
+      Baseline of the shipping version is 0.94 on this set. The bar sits
+      roughly four mis-routes below it, which is the agreed tolerance before
+      a release is held.
+  priority_accuracy:
+    min: 0.85
+    rationale: >
+      Priority errors change response time rather than destination, so the
+      tolerance is the same as routing but the consequence is lower.
