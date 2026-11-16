@@ -104,6 +104,36 @@ jobs:
               body: fs.readFileSync(report, 'utf8'),
             });
 
+  container:
+    name: Build and smoke-test container
+    runs-on: ubuntu-latest
+    needs: [ test ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      # Build the same Dockerfile CD ships, but do not push it. This proves the
+      # image builds, starts, contains the prompt, and reports the release id
+      # of this commit -- before anything is merged.
+      - name: Build image
+        run: docker build --build-arg GIT_SHA=${{ github.sha }} -t triage-api:ci .
+
+      - name: Run image with the offline backend
+        run: docker run -d --name triage -p 8000:8000 triage-api:ci
+
+      - name: Smoke test the running container
+        run: python scripts/smoke_test.py --url http://127.0.0.1:8000 --manifest agent/agent.yaml --wait 60
+        env:
+          PYTHONPATH: src
+
+      - name: Container logs
+        if: always()
+        run: docker logs triage || true
+
   infra:
     name: Validate infrastructure
     runs-on: ubuntu-latest

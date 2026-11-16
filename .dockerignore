@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+demo
+docs
+evals
+infra
+scripts
+tests
+*.md
+# The prompts are Markdown and must be in the image.
+!agent/**

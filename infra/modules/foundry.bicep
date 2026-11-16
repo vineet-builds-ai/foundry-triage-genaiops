@@ -92,9 +92,15 @@ resource project 'Microsoft.CognitiveServices/accounts/projects@2025-12-01' = {
 // Model version is pinned per environment via parameters, so a new model
 // version reaching production is a reviewed parameter change rather than a
 // silent upgrade underneath a running workload.
+//
+// The project, the model deployment and the diagnostic setting all modify the
+// same account, and the account accepts one change at a time: deployed in
+// parallel they fail with RequestConflict ("Another operation is in
+// progress"). The explicit dependencies below serialise them.
 resource modelDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-06-01' = {
   parent: foundryAccount
   name: modelDeploymentName
+  dependsOn: [ project ]
   sku: {
     name: 'GlobalStandard'
     capacity: modelCapacity
@@ -113,6 +119,7 @@ resource modelDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-
 resource diagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
   name: 'send-to-law'
   scope: foundryAccount
+  dependsOn: [ modelDeployment ]
   properties: {
     workspaceId: logAnalyticsWorkspaceId
     logs: [

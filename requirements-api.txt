@@ -1,0 +1,9 @@
+# Runtime dependencies of the triage API container. Deliberately separate from
+# requirements.txt: the service does not need the evaluation SDK, and leaving
+# it out keeps the image small and its attack surface narrow.
+PyYAML>=6.0
+fastapi>=0.115
+uvicorn[standard]>=0.30
+azure-identity>=1.19
+openai>=1.60
+azure-monitor-opentelemetry>=1.6

@@ -32,6 +32,8 @@ class AgentManifest:
     tools: list[str]
     dataset: str
     raw: dict[str, Any]
+    runtime_timeout_seconds: float = 30.0
+    runtime_max_retries: int = 2
 
     @property
     def prompt_sha256(self) -> str:
@@ -56,6 +58,7 @@ def load_manifest(path: str | Path) -> AgentManifest:
 
     model = data.get("model") or {}
     evaluation = data.get("evaluation") or {}
+    runtime = data.get("runtime") or {}
 
     return AgentManifest(
         path=manifest_path,
@@ -71,4 +74,6 @@ def load_manifest(path: str | Path) -> AgentManifest:
         tools=list(data.get("tools") or []),
         dataset=evaluation.get("dataset", "evals/datasets/tickets.golden.jsonl"),
         raw=data,
+        runtime_timeout_seconds=float(runtime.get("timeout_seconds", 30)),
+        runtime_max_retries=int(runtime.get("max_retries", 2)),
     )

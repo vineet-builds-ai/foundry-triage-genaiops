@@ -32,9 +32,12 @@ if (( ${#REVISIONS[@]} == 0 )); then
   exit 1
 fi
 
-LATEST="${REVISIONS[-1]}"
+# The workflow passes both names explicitly, so traffic always moves between
+# the two revisions of THIS release and never onto an older one by accident.
+# Without them, fall back to the two most recently created active revisions.
+LATEST="${CANARY_REVISION:-${REVISIONS[-1]}}"
 
-if (( ${#REVISIONS[@]} == 1 )); then
+if [[ -z "${STABLE_REVISION:-}" ]] && (( ${#REVISIONS[@]} == 1 )); then
   echo "Only one active revision (${LATEST}); sending all traffic to it."
   az containerapp ingress traffic set \
     --name "$CONTAINER_APP" --resource-group "$RESOURCE_GROUP" \
@@ -42,8 +45,13 @@ if (( ${#REVISIONS[@]} == 1 )); then
   exit 0
 fi
 
-PREVIOUS="${REVISIONS[-2]}"
+PREVIOUS="${STABLE_REVISION:-${REVISIONS[-2]}}"
 REMAINDER=$(( 100 - WEIGHT ))
+
+if [[ "$PREVIOUS" == "$LATEST" ]]; then
+  echo "Stable and canary are the same revision (${LATEST}); nothing to split."
+  exit 0
+fi
 
 echo "Previous revision : ${PREVIOUS}  -> ${REMAINDER}%"
 echo "New revision      : ${LATEST}    -> ${WEIGHT}%"
@@ -55,4 +63,18 @@ az containerapp ingress traffic set \
 
 if (( WEIGHT == 0 )); then
   echo "ROLLED BACK: all traffic is on ${PREVIOUS}."
+fi
+
+# Once a release is fully live, retire everything older than the revision it
+# replaced. The previous revision stays active so rollback is still a traffic
+# change, but revisions from several releases ago stop holding replicas (in
+# production that is minReplicas each) and stop counting toward the app's
+# revision limit.
+if (( WEIGHT == 100 )); then
+  for OLD in "${REVISIONS[@]}"; do
+    [[ "$OLD" == "$LATEST" || "$OLD" == "$PREVIOUS" ]] && continue
+    echo "Deactivating old revision ${OLD}"
+    az containerapp revision deactivate \
+      --name "$CONTAINER_APP" --resource-group "$RESOURCE_GROUP" --revision "$OLD" -o none
+  done
 fi

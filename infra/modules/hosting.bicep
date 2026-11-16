@@ -28,8 +28,14 @@ param foundryProjectEndpoint string
 
 param modelDeploymentName string
 
-@description('Image for the triage API. CD overrides this with the built digest.')
-param containerImage string = 'mcr.microsoft.com/k8se/quickstart:latest'
+@description('Image for the triage API, pinned by digest. CD builds it once and passes the same digest to every environment. Empty deploys a placeholder, used only to bootstrap an environment before the first build.')
+param containerImage string = ''
+
+@description('Suffix for the revision this deployment creates, so each revision names the release and run that produced it. Empty lets Container Apps generate one.')
+param revisionSuffix string = ''
+
+@description('Revision currently serving traffic. When set (production), the new revision starts at 0% and the canary script moves traffic deliberately. When empty, the new revision takes all traffic at once (dev, acceptance, first deployment).')
+param stableRevisionName string = ''
 
 @minValue(0)
 param minReplicas int = 0
@@ -38,6 +44,59 @@ param minReplicas int = 0
 param maxReplicas int = 2
 
 var useVnet = !empty(infrastructureSubnetId)
+var useAppImage = !empty(containerImage)
+var image = useAppImage ? containerImage : 'mcr.microsoft.com/k8se/quickstart:latest'
+// The placeholder listens on 80; the triage API on 8000.
+var targetPort = useAppImage ? 8000 : 80
+
+// Without an explicit traffic block Container Apps sends 100% to the newest
+// revision the moment it is ready -- which would make the "canary" a full
+// release. Pinning traffic to the stable revision is what makes it a canary.
+var trafficSplit = empty(stableRevisionName) ? [
+  {
+    latestRevision: true
+    weight: 100
+  }
+] : [
+  {
+    revisionName: stableRevisionName
+    weight: 100
+  }
+  {
+    latestRevision: true
+    weight: 0
+  }
+]
+
+var probes = useAppImage ? [
+  {
+    type: 'Startup'
+    httpGet: {
+      path: '/healthz'
+      port: 8000
+    }
+    periodSeconds: 5
+    failureThreshold: 24
+  }
+  {
+    type: 'Liveness'
+    httpGet: {
+      path: '/healthz'
+      port: 8000
+    }
+    periodSeconds: 30
+    failureThreshold: 3
+  }
+  {
+    type: 'Readiness'
+    httpGet: {
+      path: '/healthz'
+      port: 8000
+    }
+    periodSeconds: 10
+    failureThreshold: 3
+  }
+] : []
 
 resource managedEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' = {
   name: '${namePrefix}-cae'
@@ -75,16 +134,19 @@ resource triageApi 'Microsoft.App/containerApps@2024-03-01' = {
       activeRevisionsMode: 'Multiple' // Required for the canary rollout.
       ingress: {
         external: environmentName == 'dev'
-        targetPort: 8000
+        targetPort: targetPort
         transport: 'auto'
         allowInsecure: false
+        traffic: trafficSplit
       }
     }
     template: {
+      revisionSuffix: empty(revisionSuffix) ? null : revisionSuffix
       containers: [
         {
           name: 'triage-api'
-          image: containerImage
+          image: image
+          probes: probes
           resources: {
             cpu: json('0.5')
             memory: '1Gi'
@@ -130,4 +192,6 @@ resource triageApi 'Microsoft.App/containerApps@2024-03-01' = {
 output managedEnvironmentId string = managedEnvironment.id
 output containerAppName string = triageApi.name
 output fqdn string = triageApi.properties.configuration.ingress.fqdn
+output latestRevisionName string = triageApi.properties.latestRevisionName
+output latestRevisionFqdn string = triageApi.properties.latestRevisionFqdn
 output managedIdentityPrincipalId string = triageApi.identity.principalId
