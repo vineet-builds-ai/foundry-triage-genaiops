@@ -227,8 +227,8 @@ only through a private endpoint.
 
 | Principal | Access | Where |
 | --- | --- | --- |
-| Developers (Entra group) | Foundry User — data plane | **Dev only.** No standing access to acceptance or production. |
-| CI/CD identity | Foundry Project Manager | Acceptance and production, scoped to the project, federated credential with no stored secret |
+| Developers (Entra group) | Foundry User — data plane | **Dev Foundry resource only.** No standing access to acceptance or production. |
+| CI/CD identity | Foundry Project Manager on the project, Foundry User on the resource | Each environment; federated credential with no stored secret |
 | Workload identity | Foundry User — data plane | Can call the model; cannot change deployments or projects |
 
 Role **GUIDs** are used rather than names, because the Foundry roles were
@@ -276,7 +276,8 @@ docs/                         Release process, architecture, governance, cost, d
 | Gate, regressed version, **real model** (2 runs) | Blocked: schema 0.000, security recall 0.875 on the worse run, priority 0.837 |
 | Bicep | `main.bicep` and all three parameter files compile clean |
 | Workflows | Parse and pass `actionlint` |
-| Dev environment | Deployed to Azure (West Europe) from these templates |
+| Dev environment | Deployed to Azure (West Europe) by the pipeline. Live service passes the smoke test: right release id, real model, about 1 s and 573 tokens per ticket |
+| Performance check, dev | Correctly fails under 4 concurrent callers: dev's 10K tokens-per-minute quota allows about 17 tickets a minute, so a quarter of requests were rate limited |
 
 What the real model showed. It does not behave like the offline policy
 interpreter: with the security rule deleted it still routed seven of eight

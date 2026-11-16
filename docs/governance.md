@@ -17,11 +17,16 @@ What a security or compliance reviewer will ask, and where the answer lives.
 
 See `infra/modules/rbac.bicep`.
 
+Model inference is authorised on the Foundry **resource** (the account), not
+the project: a project-only assignment does not allow calling a model
+deployment. Each environment has its own Foundry resource, so resource scope
+still grants nothing outside that environment.
+
 | Principal | Role | Scope | Notes |
 | --- | --- | --- | --- |
-| Developer group | Foundry User | Dev project only | No standing access to acceptance or production. |
-| CI/CD identity | Foundry Project Manager | Acceptance and production projects | Federated credential. No client secret exists. |
-| Workload identity | Foundry User | Its own environment's project | Data plane only. Cannot alter deployments. |
+| Developer group | Foundry User | Dev Foundry resource only | No standing access to acceptance or production. |
+| CI/CD identity | Foundry Project Manager on the project; Foundry User on the resource | Each environment | Federated credential. No client secret exists. Foundry User lets it run the gate against the model. |
+| Workload identity | Foundry User | Its own environment's Foundry resource | Data plane only. Cannot alter deployments. |
 
 Two deliberate absences: no human principal holds standing data-plane access
 to acceptance or production, and no shared key exists anywhere —

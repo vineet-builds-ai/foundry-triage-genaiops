@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
+from collections import Counter
 import sys
 import time
 import urllib.error
@@ -109,6 +110,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{len(results)} requests, concurrency {args.concurrency}, {wall:.1f}s wall, "
           f"{len(results) / wall:.1f} req/s")
     print(f"latency p50 {p50:.0f} ms, p95 {p95:.0f} ms, max {max(latencies, default=0):.0f} ms")
+    failures = Counter(r["status"] for r in results if r["status"] != 200)
+    if failures:
+        labels = {0: "no response", 429: "rate limited (model quota)", 503: "model unavailable"}
+        print("errors: " + ", ".join(f"{n} x {labels.get(code, f'HTTP {code}')}" for code, n in failures.most_common()))
     if tokens:
         print(f"tokens per ticket: mean {mean_tokens:.0f}  ->  {mean_tokens * 1000:,.0f} tokens per 1,000 tickets")
     else:

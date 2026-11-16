@@ -124,9 +124,18 @@ def create_app(agent: TriageAgent | None = None) -> FastAPI:
         started = time.perf_counter()
         try:
             raw, usage = decide_with_usage(a.backend, ticket.ticket_id, ticket.text, a.manifest.prompt)
-        except Exception as exc:  # noqa: BLE001 - any model failure is a 503
+        except Exception as exc:  # noqa: BLE001 - any model failure is reported, never hidden
+            rate_limited = type(exc).__name__ == "RateLimitError"
+            # The error text comes from the model service, not the ticket, so it
+            # is safe to log and is what makes a 401 or 429 diagnosable.
             log.error("model call failed", extra={"release_id": a.manifest.release_id,
-                                                  "error_type": type(exc).__name__})
+                                                  "error_type": type(exc).__name__,
+                                                  "error": str(exc)[:500]})
+            if rate_limited:
+                # Quota exhausted: tell the caller to back off rather than
+                # reporting the service as broken.
+                raise HTTPException(status_code=429, detail="model rate limit reached",
+                                    headers={"Retry-After": "10"}) from exc
             raise HTTPException(status_code=503, detail="model unavailable") from exc
         latency_ms = round((time.perf_counter() - started) * 1000, 1)
 
