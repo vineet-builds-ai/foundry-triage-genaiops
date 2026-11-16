@@ -88,6 +88,27 @@ def test_contract_violation_fails_safe_to_human_review(shipping_manifest):
     assert resp.headers["X-Triage-Fallback"] == "contract-violation"
 
 
+class RateLimitError(Exception):
+    """Stands in for openai.RateLimitError, matched by name."""
+
+
+class _ThrottledModel:
+    name = "throttled"
+
+    def decide(self, ticket_id, text, spec):
+        raise RateLimitError("429 Too Many Requests")
+
+
+def test_rate_limit_is_a_429_with_retry_after(shipping_manifest):
+    client = TestClient(
+        create_app(TriageAgent(shipping_manifest, backend=_ThrottledModel())),
+        raise_server_exceptions=False,
+    )
+    resp = client.post("/triage", json={"ticket_id": "T-9", "text": "refund please"})
+    assert resp.status_code == 429
+    assert resp.headers["Retry-After"] == "10"
+
+
 def test_model_outage_is_a_503_not_a_fallback(shipping_manifest):
     client = TestClient(
         create_app(TriageAgent(shipping_manifest, backend=_UnreachableModel())),

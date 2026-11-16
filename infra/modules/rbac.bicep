@@ -55,10 +55,17 @@ resource project 'Microsoft.CognitiveServices/accounts/projects@2025-12-01' exis
 
 var isDev = environmentName == 'dev'
 
+// Scope, learned the hard way. Model deployments belong to the Foundry
+// ACCOUNT, and inference is authorised there: "a project-only role assignment
+// doesn't authorize model inference" (Microsoft Learn, Foundry evaluation
+// permissions). Anything that calls the model therefore holds Foundry User on
+// the account. Each environment has its own account, so this still grants
+// nothing outside the environment.
+
 // Developers: data-plane access in dev only.
 resource developerAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (isDev && !empty(developerGroupObjectId)) {
-  scope: project
-  name: guid(project.id, developerGroupObjectId, roleFoundryUser)
+  scope: foundryAccount
+  name: guid(foundryAccount.id, developerGroupObjectId, roleFoundryUser)
   properties: {
     principalId: developerGroupObjectId
     principalType: 'Group'
@@ -79,10 +86,22 @@ resource cicdAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!
   }
 }
 
+// CI/CD: calls the model to run the evaluation gate against this environment.
+resource cicdInference 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(cicdPrincipalId)) {
+  scope: foundryAccount
+  name: guid(foundryAccount.id, cicdPrincipalId, roleFoundryUser)
+  properties: {
+    principalId: cicdPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roleFoundryUser)
+    description: 'Runs the evaluation gate against the ${environmentName} model. Data plane only.'
+  }
+}
+
 // The running workload: data plane only.
 resource workloadAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(workloadPrincipalId)) {
-  scope: project
-  name: guid(project.id, workloadPrincipalId, roleFoundryUser)
+  scope: foundryAccount
+  name: guid(foundryAccount.id, workloadPrincipalId, roleFoundryUser)
   properties: {
     principalId: workloadPrincipalId
     principalType: 'ServicePrincipal'

@@ -263,6 +263,10 @@ likelihood:
 | Model deployment fails on capacity | No `gpt-4o-mini` quota in that region. Check **Quotas** in the Foundry portal and either raise it or change region. |
 | `InvalidResourceName` on the Foundry account | Name collision — `customSubDomainName` must be globally unique. The template uses `uniqueString`, but a leftover soft-deleted account holds the name. Purge it. |
 | Role assignment fails | Missing `User Access Administrator` from step 4. |
+| `RequestConflict`, "another operation is in progress" on the Foundry account | Parallel changes to the account. Fixed in the template with explicit dependencies; if it recurs, re-run the deployment. |
+| API is healthy and serves the right version, but `/triage` returns 503 and logs `AuthenticationError` | The identity lacks **Foundry User on the Foundry resource**. A project-only assignment does not authorise model inference. |
+| Still `AuthenticationError` after fixing the role | The running replica holds a token issued before the change. Restart the revision: `az containerapp revision restart`. |
+| `/triage` returns 429, perf check fails on error rate | The model deployment's tokens-per-minute quota (`modelCapacity`) is exhausted. At about 570 tokens per ticket, 10K TPM is roughly 17 tickets a minute. Size capacity for the load you test with. |
 | Policy denies the deployment | A landing zone policy requires a tag or forbids public network access. Read the denial; it names the policy. |
 
 Then capture the outputs:
