@@ -78,7 +78,12 @@ echo "CICD_PRINCIPAL_ID  = $(az ad sp show --id "$APP_ID" --query id -o tsv)"
 This is where setups created in late 2026 break, and the standard examples are
 out of date.
 
-GitHub changed the default OIDC subject format. <cite index="65-1">Repositories created after July 15, 2026 now use an immutable default subject format that includes both the owner ID and repository ID</cite>, with the syntax <cite index="65-1">`repo:OWNER@OWNER-ID/REPO@REPO-ID:ref:refs/heads/BRANCH`</cite>. <cite index="65-1">Repositories created before July 15, 2026 keep the previous format unless you opt in</cite>, and <cite index="65-1">repository renames and transfers after July 15, 2026 also move to the immutable format</cite>.
+GitHub changed the default OIDC subject format. Repositories created after
+15 July 2026 use an immutable default subject format that includes both the
+owner ID and the repository ID, with the syntax
+`repo:OWNER@OWNER-ID/REPO@REPO-ID:ref:refs/heads/BRANCH`. Repositories created
+before that date keep the previous format unless they opt in, and repository
+renames and transfers after that date also move to the immutable format.
 
 **This repository was created after that date, so it uses the immutable
 format.** A credential written with the classic `repo:owner/repo:environment:x`
@@ -147,17 +152,38 @@ for ENV in dev acceptance prod; do
 done
 ```
 
-`User Access Administrator` is a privileged role. It is needed because the
-template assigns Foundry roles to the workload identity. Two alternatives if a
-client's security team objects, and they will:
+`User Access Administrator` is a privileged role. It is needed only if the
+pipeline itself creates the role assignments in `infra/modules/rbac.bicep`.
+Many tenants forbid granting it (for example with an ABAC condition on Owner
+that excludes Owner, User Access Administrator and Role Based Access Control
+Administrator). The template supports the alternative directly:
 
-- A custom role limited to `Microsoft.Authorization/roleAssignments/write`
-  scoped to the resource group.
-- Move the role assignments out of Bicep and have a platform team apply them
-  separately.
+### Bootstrap role assignments once, then deploy without them
 
-Record whichever you choose as an accepted decision rather than leaving it
-implicit.
+`deployRoleAssignments` (environment variable `DEPLOY_ROLE_ASSIGNMENTS`)
+controls whether a deployment creates the role assignments. Someone who holds
+`roleAssignments/write` (an Owner, or the platform team) runs the first
+deployment of each environment with it on:
+
+```bash
+export CICD_PRINCIPAL_ID="<from step 3>"
+export DEPLOY_ROLE_ASSIGNMENTS=true REVISION_SUFFIX=bootstrap
+az deployment group create \
+  --resource-group rg-tickettriage-dev \
+  --template-file infra/main.bicep \
+  --parameters infra/env/dev.bicepparam \
+  --name triage-dev-bootstrap
+```
+
+With no `CONTAINER_IMAGE` set this deploys a placeholder container. That is
+fine: what matters is that the workload's managed identity and the CI/CD
+identity receive their Foundry roles. The pipeline then deploys with
+`DEPLOY_ROLE_ASSIGNMENTS=false` (its default), so it needs only
+`Contributor`, and the managed identity keeps its roles across deployments.
+Skip the `User Access Administrator` assignment above in this case.
+
+Re-run the bootstrap only when the access model itself changes. Record the
+choice as an accepted decision rather than leaving it implicit.
 
 ---
 
@@ -187,14 +213,32 @@ Set per environment, because the value differs:
 | `DNS_ZONE_COGNITIVESERVICES` | acceptance, production | Platform-owned private DNS zone |
 | `DNS_ZONE_OPENAI` | acceptance, production | Platform-owned |
 | `DNS_ZONE_AISERVICES` | acceptance, production | Platform-owned |
-| `FOUNDRY_PROJECT_ENDPOINT_ACCEPTANCE` | acceptance | Known only after the first acceptance deployment — see step 6 |
-| `PROD_CONTAINER_APP` | production | Container app name, after the first production deployment |
 | `APPLICATION_INSIGHTS_APP_ID` | production | Optional. Enables the continuous-evaluation check in the canary watch. |
 
-The last three are chicken-and-egg: the deployment produces them. Leave them
-unset for the first run and fill them in afterwards from the deployment
-outputs. The workflows tolerate empty values — the canary watch skips the
-continuous-evaluation check when `APPLICATION_INSIGHTS_APP_ID` is absent.
+The Foundry project endpoint, container app name and revision names are read
+from each deployment's outputs, so they need no variables. The workflows
+tolerate an empty `APPLICATION_INSIGHTS_APP_ID`: the canary watch then checks
+error rate only.
+
+Optional, repository level:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DEPLOY_ROLE_ASSIGNMENTS` | `false` | Set `true` only if the pipeline identity may create role assignments (step 4). |
+| `PRIVATE_RUNNER_LABEL` | `ubuntu-latest` | Runner for acceptance and production. Those environments are private, so their smoke tests, gate and performance check must run inside the network. |
+| `PERF_P95_BUDGET_MS` | `4000` | Acceptance latency budget. |
+| `PERF_TOKENS_BUDGET` | `1500` | Acceptance budget for mean tokens per ticket. |
+| `CANARY_MIN_REQUESTS` | `0` | Minimum canary requests before the error rate is trusted. |
+
+### Container registry
+
+CD builds the image once and pushes it to GitHub Container Registry
+(`ghcr.io/<owner>/<repo>`), then deploys it by digest. Container Apps pulls it
+anonymously, so **set the package's visibility to public** once after the
+first build (repository **Packages → the package → Package settings →
+Change visibility**). For a private estate, use a shared Azure Container
+Registry instead and give each container app's managed identity `AcrPull`;
+the workflow change is the registry name and login step.
 
 ---
 
@@ -230,9 +274,6 @@ az deployment group show \
   --query properties.outputs
 ```
 
-Put `foundryProjectEndpoint` into `FOUNDRY_PROJECT_ENDPOINT_ACCEPTANCE` once
-you have run the same for acceptance.
-
 ### Run the gate against the real model
 
 The moment worth checking carefully — this is the first time a real model, not
@@ -261,6 +302,7 @@ the offline interpreter and are a starting point, not an answer.
 
 Push to `main` and let CD run. It will stop at the `acceptance` approval if
 you configured a reviewer, and again at `production`.
+[release-process.md](release-process.md) describes what each stage checks.
 
 Verify the things the demo claims:
 

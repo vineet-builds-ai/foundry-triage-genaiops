@@ -43,6 +43,36 @@ class ModelBackend(Protocol):
         ...
 
 
+def decide_with_usage(
+    backend: ModelBackend, ticket_id: str, text: str, spec: PromptSpec
+) -> tuple[str, dict[str, int]]:
+    """Return the raw output plus token usage, for backends that report it.
+
+    Usage is returned alongside the output rather than stored on the backend,
+    because the API serves concurrent requests from one backend instance.
+    """
+    method = getattr(backend, "decide_with_usage", None)
+    if callable(method):
+        return method(ticket_id, text, spec)
+    return backend.decide(ticket_id, text, spec), {}
+
+
+def account_endpoint(endpoint: str) -> str:
+    """Reduce a Foundry project endpoint to the account endpoint.
+
+    The infrastructure hands the workload the *project* endpoint
+    (https://<account>.services.ai.azure.com/api/projects/<project>), which is
+    what the evaluation and projects SDKs expect. Model inference through the
+    Azure OpenAI client is served from the account root, so strip the project
+    path. An account endpoint passes through unchanged.
+    """
+    base = endpoint.strip().rstrip("/")
+    marker = "/api/projects/"
+    if marker in base:
+        base = base.split(marker, 1)[0]
+    return base + "/"
+
+
 class LocalPolicyBackend:
     """Deterministic interpreter of the prompt's declared routing policy."""
 
@@ -110,12 +140,16 @@ class FoundryBackend:
         api_version: str,
         temperature: float = 0.0,
         max_output_tokens: int = 500,
+        timeout_seconds: float = 30.0,
+        max_retries: int = 2,
     ) -> None:
-        self.endpoint = endpoint
+        self.endpoint = account_endpoint(endpoint)
         self.deployment = deployment
         self.api_version = api_version
         self.temperature = temperature
         self.max_output_tokens = max_output_tokens
+        self.timeout_seconds = timeout_seconds
+        self.max_retries = max_retries
         self._client: Any = None
 
     def _ensure_client(self) -> Any:
@@ -131,10 +165,17 @@ class FoundryBackend:
                 azure_endpoint=self.endpoint,
                 api_version=self.api_version,
                 azure_ad_token_provider=token_provider,
+                timeout=self.timeout_seconds,
+                max_retries=self.max_retries,
             )
         return self._client
 
     def decide(self, ticket_id: str, text: str, spec: PromptSpec) -> str:
+        return self.decide_with_usage(ticket_id, text, spec)[0]
+
+    def decide_with_usage(
+        self, ticket_id: str, text: str, spec: PromptSpec
+    ) -> tuple[str, dict[str, int]]:
         client = self._ensure_client()
         completion = client.chat.completions.create(
             model=self.deployment,
@@ -149,7 +190,13 @@ class FoundryBackend:
                 },
             ],
         )
-        return completion.choices[0].message.content or ""
+        usage = getattr(completion, "usage", None)
+        tokens = {
+            "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+            "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+            "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
+        } if usage is not None else {}
+        return completion.choices[0].message.content or "", tokens
 
 
 def select_backend(manifest: Any) -> ModelBackend:
@@ -167,4 +214,6 @@ def select_backend(manifest: Any) -> ModelBackend:
         api_version=manifest.model_api_version,
         temperature=manifest.model_temperature,
         max_output_tokens=manifest.model_max_output_tokens,
+        timeout_seconds=float(getattr(manifest, "runtime_timeout_seconds", 30.0)),
+        max_retries=int(getattr(manifest, "runtime_max_retries", 2)),
     )

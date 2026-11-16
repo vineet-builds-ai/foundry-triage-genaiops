@@ -1,9 +1,22 @@
 # Promotion pipeline.
 #
 # One pinned agent version moves dev -> acceptance -> production. The version
-# is resolved once, at the start, and every later job refers to that same
-# release id. Nothing is rebuilt between environments, so what production runs
-# is bit-for-bit what acceptance approved.
+# is resolved once and the container image is built once, at the start. Every
+# later job deploys that same image by digest, so what production runs is
+# byte-for-byte what acceptance approved.
+#
+# What each stage proves before the next one starts:
+#
+#   build       The image builds and is pushed once, addressed by digest.
+#   dev         It deploys, it is the version we think it is (smoke test), and
+#               the real model clears the dev bar.
+#   acceptance  Business sign-off (environment approval), then: the real model
+#               clears the acceptance bar on several runs, and latency, error
+#               rate and tokens per ticket are inside budget.
+#   production  Release approval, then: the new revision is smoke-tested at 0%
+#               traffic, takes 10% as a canary, is watched for errors and
+#               quality, and only then takes everything. Any failure after the
+#               deploy puts traffic back on the previous revision.
 #
 # Approvals and who may approve them are configured per environment under
 # Settings > Environments in the repository, not in this file. That is
@@ -12,6 +25,11 @@
 #
 # Azure authentication uses OIDC federated credentials. There is no client
 # secret in this repository and none to rotate.
+#
+# Role assignments are NOT created by this pipeline by default
+# (DEPLOY_ROLE_ASSIGNMENTS=false). They are bootstrapped once per environment
+# by someone who holds roleAssignments/write; after that the pipeline identity
+# needs only Contributor on the resource group. See docs/setup.md.
 
 name: CD
 
@@ -23,6 +41,9 @@ on:
       - 'src/**'
       - 'evals/**'
       - 'infra/**'
+      - 'scripts/**'
+      - 'Dockerfile'
+      - 'requirements*.txt'
       - '.github/workflows/cd.yml'
   workflow_dispatch:
     inputs:
@@ -42,6 +63,7 @@ concurrency:
 env:
   MANIFEST: ${{ github.event.inputs.manifest || 'agent/agent.yaml' }}
   PYTHONPATH: src
+  IMAGE_REPO: ghcr.io/${{ github.repository }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -53,6 +75,7 @@ jobs:
     outputs:
       release_id: ${{ steps.id.outputs.release_id }}
       prompt_sha: ${{ steps.id.outputs.prompt_sha }}
+      revision_suffix: ${{ steps.id.outputs.revision_suffix }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -75,6 +98,8 @@ jobs:
           print(f"release_id={m.release_id}")
           print(f"prompt_sha={m.prompt_sha256}")
           PY
+          # Revision names must start with a letter: r<run>-<attempt>-<sha7>.
+          echo "revision_suffix=r${{ github.run_number }}-${{ github.run_attempt }}-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Record what is being promoted
         run: |
@@ -99,21 +124,61 @@ jobs:
       - run: bash scripts/check_networking_params.sh
 
   # ---------------------------------------------------------------------------
+  # Build the image once. Every environment deploys this digest.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build and push image
+    runs-on: ubuntu-latest
+    needs: [ resolve ]
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.ref.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: GIT_SHA=${{ github.sha }}
+          tags: |
+            ${{ env.IMAGE_REPO }}:${{ needs.resolve.outputs.release_id }}
+            ${{ env.IMAGE_REPO }}:sha-${{ github.sha }}
+
+      # Deploy by digest, never by tag. A tag can be moved; a digest cannot.
+      - name: Image reference
+        id: ref
+        run: |
+          echo "image=${IMAGE_REPO}@${{ steps.push.outputs.digest }}" >> "$GITHUB_OUTPUT"
+          echo "Image: \`${IMAGE_REPO}@${{ steps.push.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
   # Dev.
   # ---------------------------------------------------------------------------
   dev:
     name: Deploy and gate -- dev
     runs-on: ubuntu-latest
-    needs: [ resolve, validate-infra ]
+    needs: [ resolve, validate-infra, build ]
     environment:
       name: dev
+      url: ${{ steps.deploy.outputs.url }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements-cloud.txt
 
       - uses: azure/login@v2
         with:
@@ -121,42 +186,65 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Deploy infrastructure
+      - name: Deploy infrastructure and image
+        id: deploy
         run: |
           az deployment group create \
             --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
             --template-file infra/main.bicep \
             --parameters infra/env/dev.bicepparam \
-            --name "triage-dev-${{ github.run_number }}"
+            --name "triage-dev-${{ github.run_number }}-${{ github.run_attempt }}" \
+            --query properties.outputs -o json > outputs.json
+          echo "url=https://$(jq -r .triageApiFqdn.value outputs.json)" >> "$GITHUB_OUTPUT"
+          echo "project_endpoint=$(jq -r .foundryProjectEndpoint.value outputs.json)" >> "$GITHUB_OUTPUT"
         env:
+          CONTAINER_IMAGE: ${{ needs.build.outputs.image }}
+          REVISION_SUFFIX: ${{ needs.resolve.outputs.revision_suffix }}
+          DEPLOY_ROLE_ASSIGNMENTS: ${{ vars.DEPLOY_ROLE_ASSIGNMENTS || 'false' }}
           DEVELOPER_GROUP_OBJECT_ID: ${{ vars.DEVELOPER_GROUP_OBJECT_ID }}
           CICD_PRINCIPAL_ID: ${{ vars.CICD_PRINCIPAL_ID }}
 
-      - name: Evaluation gate -- dev thresholds
+      - name: Smoke test -- is it up, and is it this version?
+        run: python scripts/smoke_test.py --url "${{ steps.deploy.outputs.url }}" --manifest "$MANIFEST"
+
+      - name: Evaluation gate -- dev thresholds, real model
         run: python -m evals.run_gate --manifest "$MANIFEST" --env dev
+        env:
+          FOUNDRY_PROJECT_ENDPOINT: ${{ steps.deploy.outputs.project_endpoint }}
+          FOUNDRY_MODEL_DEPLOYMENT: ${{ vars.FOUNDRY_MODEL_DEPLOYMENT }}
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: gate-dev-${{ needs.resolve.outputs.release_id }}
           path: evals/_runs/
+          if-no-files-found: ignore
 
   # ---------------------------------------------------------------------------
   # Acceptance. The business bar, and a human sign-off.
+  #
+  # Acceptance and production use private networking: the Foundry endpoint and
+  # the API are not reachable from the internet. The deploy itself goes
+  # through Azure Resource Manager and works from anywhere, but the smoke test,
+  # the gate and the performance check must call the private endpoints, so
+  # these jobs need a runner inside the network. Set PRIVATE_RUNNER_LABEL to
+  # the label of a self-hosted runner (or GitHub-hosted runner with private
+  # networking) in the landing zone.
   # ---------------------------------------------------------------------------
   acceptance:
     name: Deploy and gate -- acceptance
-    runs-on: ubuntu-latest
-    needs: [ resolve, dev ]
+    runs-on: ${{ vars.PRIVATE_RUNNER_LABEL || 'ubuntu-latest' }}
+    needs: [ resolve, build, dev ]
     environment:
-      name: acceptance   # Protection rules live in repo settings.
+      name: acceptance   # Required reviewers (business sign-off) live in repo settings.
+      url: ${{ steps.deploy.outputs.url }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements-cloud.txt
 
       - uses: azure/login@v2
         with:
@@ -172,6 +260,9 @@ jobs:
             --parameters infra/env/acceptance.bicepparam \
             --no-pretty-print > whatif.json
         env:
+          CONTAINER_IMAGE: ${{ needs.build.outputs.image }}
+          REVISION_SUFFIX: ${{ needs.resolve.outputs.revision_suffix }}
+          DEPLOY_ROLE_ASSIGNMENTS: ${{ vars.DEPLOY_ROLE_ASSIGNMENTS || 'false' }}
           PRIVATE_ENDPOINT_SUBNET_ID: ${{ vars.PRIVATE_ENDPOINT_SUBNET_ID }}
           CONTAINER_APPS_SUBNET_ID: ${{ vars.CONTAINER_APPS_SUBNET_ID }}
           DNS_ZONE_COGNITIVESERVICES: ${{ vars.DNS_ZONE_COGNITIVESERVICES }}
@@ -179,14 +270,21 @@ jobs:
           DNS_ZONE_AISERVICES: ${{ vars.DNS_ZONE_AISERVICES }}
           CICD_PRINCIPAL_ID: ${{ vars.CICD_PRINCIPAL_ID }}
 
-      - name: Deploy infrastructure
+      - name: Deploy infrastructure and image
+        id: deploy
         run: |
           az deployment group create \
             --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
             --template-file infra/main.bicep \
             --parameters infra/env/acceptance.bicepparam \
-            --name "triage-acc-${{ github.run_number }}"
+            --name "triage-acc-${{ github.run_number }}-${{ github.run_attempt }}" \
+            --query properties.outputs -o json > outputs.json
+          echo "url=https://$(jq -r .triageApiFqdn.value outputs.json)" >> "$GITHUB_OUTPUT"
+          echo "project_endpoint=$(jq -r .foundryProjectEndpoint.value outputs.json)" >> "$GITHUB_OUTPUT"
         env:
+          CONTAINER_IMAGE: ${{ needs.build.outputs.image }}
+          REVISION_SUFFIX: ${{ needs.resolve.outputs.revision_suffix }}
+          DEPLOY_ROLE_ASSIGNMENTS: ${{ vars.DEPLOY_ROLE_ASSIGNMENTS || 'false' }}
           PRIVATE_ENDPOINT_SUBNET_ID: ${{ vars.PRIVATE_ENDPOINT_SUBNET_ID }}
           CONTAINER_APPS_SUBNET_ID: ${{ vars.CONTAINER_APPS_SUBNET_ID }}
           DNS_ZONE_COGNITIVESERVICES: ${{ vars.DNS_ZONE_COGNITIVESERVICES }}
@@ -194,38 +292,51 @@ jobs:
           DNS_ZONE_AISERVICES: ${{ vars.DNS_ZONE_AISERVICES }}
           CICD_PRINCIPAL_ID: ${{ vars.CICD_PRINCIPAL_ID }}
 
-      # The promotion bar. Cloud evaluation runs here when a project endpoint
-      # is configured, which adds the LLM-judge and content-safety evaluators
-      # on top of the deterministic ones.
-      - name: Evaluation gate -- acceptance thresholds
-        run: python -m evals.run_gate --manifest "$MANIFEST" --env acceptance
+      - name: Smoke test
+        run: python scripts/smoke_test.py --url "${{ steps.deploy.outputs.url }}" --manifest "$MANIFEST"
+
+      # The promotion bar, scored several times against the real model and
+      # gated on the worst run. Cloud evaluation adds the LLM-judge and
+      # content-safety evaluators on top of the deterministic ones.
+      - name: Evaluation gate -- acceptance thresholds, worst of 3 runs
+        run: python -m evals.run_gate --manifest "$MANIFEST" --env acceptance --repeats 3
         env:
-          FOUNDRY_PROJECT_ENDPOINT: ${{ vars.FOUNDRY_PROJECT_ENDPOINT_ACCEPTANCE }}
+          FOUNDRY_PROJECT_ENDPOINT: ${{ steps.deploy.outputs.project_endpoint }}
           FOUNDRY_MODEL_DEPLOYMENT: ${{ vars.FOUNDRY_MODEL_DEPLOYMENT }}
+
+      - name: Performance -- latency, errors, tokens per ticket
+        run: |
+          python scripts/perf_check.py --url "${{ steps.deploy.outputs.url }}" \
+            --requests 60 --concurrency 4 \
+            --p95-budget-ms "${{ vars.PERF_P95_BUDGET_MS || 4000 }}" \
+            --tokens-budget "${{ vars.PERF_TOKENS_BUDGET || 1500 }}"
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: gate-acceptance-${{ needs.resolve.outputs.release_id }}
           path: evals/_runs/
+          if-no-files-found: ignore
 
   # ---------------------------------------------------------------------------
-  # Production. Re-gate, canary, then full.
+  # Production. Approve, deploy at 0%, smoke, canary, widen.
   # ---------------------------------------------------------------------------
   production:
-    name: Deploy and gate -- production
-    runs-on: ubuntu-latest
-    needs: [ resolve, acceptance ]
+    name: Deploy and release -- production
+    runs-on: ${{ vars.PRIVATE_RUNNER_LABEL || 'ubuntu-latest' }}
+    needs: [ resolve, build, acceptance ]
     environment:
       name: production   # Required reviewers configured in repo settings.
-      url: ${{ steps.deploy.outputs.fqdn }}
+      url: ${{ steps.deploy.outputs.url }}
+    env:
+      RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements-cloud.txt
 
       - uses: azure/login@v2
         with:
@@ -233,24 +344,44 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # Re-run the acceptance bar against the same pinned version immediately
-      # before release. A version that would not pass today does not ship
-      # today, even if it passed last week.
-      - name: Pre-flight gate
+      # Policy-level re-check of the exact manifest bytes at the production bar,
+      # immediately before release. Offline: the real-model scoring for this
+      # version already happened in acceptance against the same model version.
+      - name: Pre-flight gate -- production thresholds
         run: python -m evals.run_gate --manifest "$MANIFEST" --env prod
 
-      - name: Deploy infrastructure
+      - name: Find the revision serving production now
+        id: stable
+        run: |
+          APP=$(az containerapp list -g "$RESOURCE_GROUP" --query "[0].name" -o tsv)
+          STABLE=""
+          if [[ -n "$APP" ]]; then
+            STABLE=$(az containerapp ingress traffic show -n "$APP" -g "$RESOURCE_GROUP" \
+              --query "sort_by([?weight > \`0\`], &weight)[-1].revisionName" -o tsv)
+          fi
+          echo "revision=${STABLE}" >> "$GITHUB_OUTPUT"
+          echo "Stable revision before release: ${STABLE:-none (first release)}"
+
+      # With a stable revision named, the new revision is created at 0% traffic.
+      - name: Deploy infrastructure and image (new revision at 0%)
         id: deploy
         run: |
           az deployment group create \
-            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --resource-group "$RESOURCE_GROUP" \
             --template-file infra/main.bicep \
             --parameters infra/env/prod.bicepparam \
-            --name "triage-prod-${{ github.run_number }}" \
-            --query 'properties.outputs.triageApiFqdn.value' -o tsv \
-            | tee fqdn.txt
-          echo "fqdn=https://$(cat fqdn.txt)" >> "$GITHUB_OUTPUT"
+            --name "triage-prod-${{ github.run_number }}-${{ github.run_attempt }}" \
+            --query properties.outputs -o json > outputs.json
+          echo "url=https://$(jq -r .triageApiFqdn.value outputs.json)" >> "$GITHUB_OUTPUT"
+          echo "app=$(jq -r .containerAppName.value outputs.json)" >> "$GITHUB_OUTPUT"
+          echo "revision=$(jq -r .latestRevisionName.value outputs.json)" >> "$GITHUB_OUTPUT"
+          echo "revision_url=https://$(jq -r .latestRevisionFqdn.value outputs.json)" >> "$GITHUB_OUTPUT"
+          echo "project_endpoint=$(jq -r .foundryProjectEndpoint.value outputs.json)" >> "$GITHUB_OUTPUT"
         env:
+          CONTAINER_IMAGE: ${{ needs.build.outputs.image }}
+          REVISION_SUFFIX: ${{ needs.resolve.outputs.revision_suffix }}
+          STABLE_REVISION_NAME: ${{ steps.stable.outputs.revision }}
+          DEPLOY_ROLE_ASSIGNMENTS: ${{ vars.DEPLOY_ROLE_ASSIGNMENTS || 'false' }}
           PRIVATE_ENDPOINT_SUBNET_ID: ${{ vars.PRIVATE_ENDPOINT_SUBNET_ID }}
           CONTAINER_APPS_SUBNET_ID: ${{ vars.CONTAINER_APPS_SUBNET_ID }}
           DNS_ZONE_COGNITIVESERVICES: ${{ vars.DNS_ZONE_COGNITIVESERVICES }}
@@ -258,31 +389,45 @@ jobs:
           DNS_ZONE_AISERVICES: ${{ vars.DNS_ZONE_AISERVICES }}
           CICD_PRINCIPAL_ID: ${{ vars.CICD_PRINCIPAL_ID }}
 
+      # Every revision has its own address. Test the new one before any
+      # customer traffic reaches it.
+      - name: Smoke test the new revision at 0% traffic
+        run: python scripts/smoke_test.py --url "${{ steps.deploy.outputs.revision_url }}" --manifest "$MANIFEST"
+
       - name: Shift 10 percent of traffic to the new revision
         run: bash scripts/canary.sh 10
         env:
-          RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
-          CONTAINER_APP: ${{ vars.PROD_CONTAINER_APP }}
+          CONTAINER_APP: ${{ steps.deploy.outputs.app }}
+          STABLE_REVISION: ${{ steps.stable.outputs.revision }}
+          CANARY_REVISION: ${{ steps.deploy.outputs.revision }}
 
-      - name: Watch the canary
+      - name: Watch the canary -- error rate and evaluation score
         run: bash scripts/watch_canary.sh
         env:
-          RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
-          CONTAINER_APP: ${{ vars.PROD_CONTAINER_APP }}
+          CONTAINER_APP: ${{ steps.deploy.outputs.app }}
+          STABLE_REVISION: ${{ steps.stable.outputs.revision }}
+          CANARY_REVISION: ${{ steps.deploy.outputs.revision }}
+          MIN_REQUESTS: ${{ vars.CANARY_MIN_REQUESTS || 0 }}
+          FOUNDRY_PROJECT_ENDPOINT: ${{ steps.deploy.outputs.project_endpoint }}
           APPLICATION_INSIGHTS_APP_ID: ${{ vars.APPLICATION_INSIGHTS_APP_ID }}
 
       - name: Shift all traffic to the new revision
         run: bash scripts/canary.sh 100
         env:
-          RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
-          CONTAINER_APP: ${{ vars.PROD_CONTAINER_APP }}
+          CONTAINER_APP: ${{ steps.deploy.outputs.app }}
+          STABLE_REVISION: ${{ steps.stable.outputs.revision }}
+          CANARY_REVISION: ${{ steps.deploy.outputs.revision }}
 
+      # Only roll back if this run actually deployed something and there was a
+      # previous revision to return to. A failure before the deploy (for
+      # example the pre-flight gate) must leave production untouched.
       - name: Roll back on failure
-        if: failure()
+        if: failure() && steps.deploy.outcome == 'success' && steps.stable.outputs.revision != ''
         run: bash scripts/canary.sh 0
         env:
-          RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
-          CONTAINER_APP: ${{ vars.PROD_CONTAINER_APP }}
+          CONTAINER_APP: ${{ steps.deploy.outputs.app }}
+          STABLE_REVISION: ${{ steps.stable.outputs.revision }}
+          CANARY_REVISION: ${{ steps.deploy.outputs.revision }}
 
       - name: Release record
         if: always()
@@ -294,7 +439,10 @@ jobs:
             echo "| --- | --- |"
             echo "| Agent version | \`${{ needs.resolve.outputs.release_id }}\` |"
             echo "| Prompt sha256 | \`${{ needs.resolve.outputs.prompt_sha }}\` |"
+            echo "| Image | \`${{ needs.build.outputs.image }}\` |"
             echo "| Commit | \`${{ github.sha }}\` |"
-            echo "| Approved by | ${{ github.actor }} |"
+            echo "| Previous revision | \`${{ steps.stable.outputs.revision || 'none' }}\` |"
+            echo "| New revision | \`${{ steps.deploy.outputs.revision || 'not deployed' }}\` |"
+            echo "| Triggered by | ${{ github.actor }} |"
             echo "| Outcome | ${{ job.status }} |"
           } >> "$GITHUB_STEP_SUMMARY"

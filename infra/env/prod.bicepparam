@@ -24,3 +24,10 @@ param tags = {
   dataClassification: 'customer-data'
   slo: '99.9'
 }
+
+// Release wiring, supplied by the CD workflow. Defaults keep `bicep build-params`
+// working with no environment set (CI compiles these files offline).
+param containerImage = readEnvironmentVariable('CONTAINER_IMAGE', '')
+param revisionSuffix = readEnvironmentVariable('REVISION_SUFFIX', '')
+param stableRevisionName = readEnvironmentVariable('STABLE_REVISION_NAME', '')
+param deployRoleAssignments = readEnvironmentVariable('DEPLOY_ROLE_ASSIGNMENTS', 'true') == 'true'

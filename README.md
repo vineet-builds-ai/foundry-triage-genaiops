@@ -97,6 +97,29 @@ evaluation against a project.
 
 ---
 
+## From dev to production
+
+Every change takes the same path, and each stage asks a harder question.
+[docs/release-process.md](docs/release-process.md) describes every check and
+the file that runs it.
+
+```
+pull request   unit + API tests, manifest check, gate (offline), container build + smoke, Bicep
+     |
+build once     image pushed and addressed by digest; every stage deploys these exact bytes
+     |
+dev            deploy -> smoke test (right version?) -> gate against the real model
+     |
+acceptance     business approval -> deploy -> smoke -> gate, worst of 3 runs -> latency/token budgets
+     |
+production     release approval -> new revision at 0% -> smoke it -> 10% canary -> watch errors
+               and quality -> 100%, or automatic rollback to the previous revision
+     |
+after release  continuous evaluation, logs without ticket text, support corrections -> golden set
+```
+
+---
+
 ## Defence in depth
 
 Three checks, deliberately ordered cheapest first.
@@ -111,6 +134,30 @@ In the demo the static check already rejects the regression before any
 evaluation runs. The gate still runs, because the number is what makes the
 case: "this would have mis-routed every security ticket in the set" lands
 differently from "a config check failed".
+
+---
+
+## The service
+
+`src/triage/api.py` serves the agent over HTTP. The container image
+(`Dockerfile`) bakes in the manifest and prompt, so the image is the release.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /healthz` | Liveness and readiness. No model call. |
+| `GET /version` | The release id and prompt SHA-256 actually being served. Smoke tests compare it with the commit being promoted. |
+| `POST /triage` | `{"ticket_id": "...", "text": "..."}` in, a validated decision out. |
+
+If the model answers but breaks the output contract, the ticket is routed to
+human triage and the response carries `X-Triage-Fallback`. If the model cannot
+be reached, the API returns 503 so the failure shows in monitoring. Ticket
+text is never logged.
+
+```bash
+pip install -r requirements-api.txt
+PYTHONPATH=src uvicorn triage.api:app --port 8000
+python scripts/smoke_test.py --url http://127.0.0.1:8000
+```
 
 ---
 
@@ -201,17 +248,19 @@ agent/
   agent.yaml                  The promotion artefact
   agent.regressed.yaml        The deliberate regression, for the demo
   prompts/                    Reviewable routing policy, with RULE: lines
-src/triage/                   Agent, manifest loader, backends, output schema
+src/triage/                   Agent, manifest loader, backends, output schema, HTTP API
+Dockerfile                    The service image, built once and promoted by digest
 evals/
   datasets/                   49 labelled tickets, including hard cases
   evaluators/                 Deterministic, code-based, no judge model
   thresholds/                 Per-environment bars, each with its rationale
   run_gate.py                 The gate
 infra/                        Bicep: main, modules, per-environment params
-scripts/                      Manifest validation, canary, red team
+scripts/                      Manifest validation, smoke and performance checks,
+                              canary and its watch, red team, feedback harvesting
 .github/workflows/            ci, cd, redteam
 demo/                         One-command demo and a captured transcript
-docs/                         Architecture, governance, cost, demo script
+docs/                         Release process, architecture, governance, cost, demo script
 ```
 
 ---
@@ -220,20 +269,31 @@ docs/                         Architecture, governance, cost, demo script
 
 | | |
 | --- | --- |
-| Tests | 46 passing |
-| Gate, shipping version | Passes: routing 0.939, security recall 1.000 |
-| Gate, regressed version | Blocked, exit 1, on all four metrics |
+| Tests | 64 passing, including the HTTP API |
+| Gate, shipping version, offline | Passes: routing 0.939, security recall 1.000 |
+| Gate, regressed version, offline | Blocked, exit 1, on all four metrics |
+| Gate, shipping version, **real model** (gpt-4o-mini in dev, 3 runs) | Passes the acceptance bar on every run: routing 0.959, security recall 1.000, priority 0.939 to 0.959 |
+| Gate, regressed version, **real model** (2 runs) | Blocked: schema 0.000, security recall 0.875 on the worse run, priority 0.837 |
 | Bicep | `main.bicep` and all three parameter files compile clean |
-| Workflows | All three parse as valid YAML |
+| Workflows | Parse and pass `actionlint` |
+| Dev environment | Deployed to Azure (West Europe) from these templates |
 
-What has **not** been executed: an actual deployment into an Azure
-subscription. The templates compile and the pipelines are complete, but
-nothing here has been applied to live infrastructure.
+What the real model showed. It does not behave like the offline policy
+interpreter: with the security rule deleted it still routed seven of eight
+security tickets correctly, because it understands "phishing" without being
+told. The regression is still blocked, mainly because dropping
+`needs_human_review` breaks the output contract on every answer. And the two
+runs disagreed: one missed SEC-002, the other caught all eight. A single run
+could have passed it, which is why acceptance gates on the worst of several.
+
+Not yet executed: acceptance and production deployments, which need
+platform-owned private networking and a runner inside it.
 
 ---
 
 ## Further reading
 
+- [docs/release-process.md](docs/release-process.md) — every stage from pull request to production, what it tests, and which file tests it
 - [docs/setup.md](docs/setup.md) — getting from a fresh clone to a working pipeline, including the GitHub OIDC subject-claim change that breaks new repositories
 - [docs/architecture.md](docs/architecture.md) — decisions and trade-offs, and where this deviates from the Microsoft baseline
 - [docs/governance.md](docs/governance.md) — approvals, audit trail, data handling

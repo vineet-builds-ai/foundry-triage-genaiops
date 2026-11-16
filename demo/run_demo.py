@@ -188,7 +188,7 @@ def main() -> int:
         )
         print(f"  {metric:<24} {bar:>6.2f} {before:>8.3f} {after:>8.3f}   {verdict}")
 
-    misses = [r for r in regressed.get("failing_rows", []) if r["is_critical"]]
+    misses = [r for r in regressed.get("failing_rows", []) if r.get("critical_miss")]
     if misses:
         print()
         print(paint(f"  {len(misses)} security tickets were sent somewhere else:", YELLOW))

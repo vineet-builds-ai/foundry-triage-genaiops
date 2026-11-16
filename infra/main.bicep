@@ -69,6 +69,21 @@ param logRetentionDays int = 30
 @description('Tags applied to every resource.')
 param tags object = {}
 
+@description('Triage API image, pinned by digest. Built once by CD and promoted unchanged. Empty deploys a placeholder for bootstrapping.')
+param containerImage string = ''
+
+@description('Suffix naming the revision this deployment creates.')
+param revisionSuffix string = ''
+
+@description('Revision currently serving production traffic. Set by CD in production so the new revision starts at 0% (canary).')
+param stableRevisionName string = ''
+
+@description('''Create the role assignments in modules/rbac.bicep. Creating role assignments
+needs Microsoft.Authorization/roleAssignments/write. Run once with true by someone
+who holds that right (bootstrap), then let the pipeline deploy with false so the
+pipeline identity needs only Contributor. See docs/setup.md.''')
+param deployRoleAssignments bool = true
+
 // -----------------------------------------------------------------------------
 // Naming and tagging.
 //
@@ -149,6 +164,9 @@ module hosting 'modules/hosting.bicep' = {
     applicationInsightsConnectionString: observability.outputs.applicationInsightsConnectionString
     foundryProjectEndpoint: foundry.outputs.projectEndpoint
     modelDeploymentName: modelDeploymentName
+    containerImage: containerImage
+    revisionSuffix: revisionSuffix
+    stableRevisionName: stableRevisionName
     minReplicas: isProduction ? 2 : 0
     maxReplicas: isProduction ? 10 : 2
   }
@@ -158,7 +176,7 @@ module hosting 'modules/hosting.bicep' = {
 // Access control. This is the module to read first in a security review.
 // -----------------------------------------------------------------------------
 
-module rbac 'modules/rbac.bicep' = {
+module rbac 'modules/rbac.bicep' = if (deployRoleAssignments) {
   name: 'rbac'
   params: {
     environmentName: environmentName
@@ -174,6 +192,9 @@ output foundryAccountName string = foundry.outputs.accountName
 output foundryProjectName string = foundry.outputs.projectName
 output foundryProjectEndpoint string = foundry.outputs.projectEndpoint
 output triageApiFqdn string = hosting.outputs.fqdn
+output containerAppName string = hosting.outputs.containerAppName
+output latestRevisionName string = hosting.outputs.latestRevisionName
+output latestRevisionFqdn string = hosting.outputs.latestRevisionFqdn
 output workloadPrincipalId string = hosting.outputs.managedIdentityPrincipalId
 output logAnalyticsWorkspaceId string = observability.outputs.logAnalyticsWorkspaceId
 output privateNetworkingEnabled bool = enablePrivateNetworking

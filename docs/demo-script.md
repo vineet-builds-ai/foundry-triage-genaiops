@@ -203,12 +203,15 @@ before.
 ## Questions you should expect
 
 **"Would a real model behave the same way?"**
-Honest answer: the offline backend is a deterministic interpreter of the
-policy the prompt declares, not a model. A real model generalises past the
-literal keywords, so it would probably catch some of those security tickets.
-It would also be non-deterministic, which is why the gate uses a fixed dataset
-and temperature zero. The mechanism is identical either way — point at
-`FoundryBackend` and the one environment variable that switches it.
+Not exactly, and it has been measured. The offline backend is a deterministic
+interpreter of the policy the prompt declares, not a model. Against the real
+gpt-4o-mini deployment, the regressed prompt still sent seven of eight
+security tickets to the right queue, because a model knows what phishing is
+without a rule. It was still blocked: the dropped `needs_human_review` field
+broke the output contract on every answer, and one run missed a security
+ticket that the other run caught. That last point is why acceptance scores
+three runs and gates on the worst. The mechanism is identical either way;
+one environment variable switches backends.
 
 **"What if the gate blocks a release we need?"**
 Thresholds are in version control with their rationale. Changing one is a pull

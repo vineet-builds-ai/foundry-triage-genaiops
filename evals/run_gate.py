@@ -139,6 +139,11 @@ def failing_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "expected_priority": _col(row, "expected_priority") or "",
                 "predicted_priority": _col(row, "priority.predicted_priority") or "",
                 "is_critical": float(_col(row, "routing.is_critical") or 0.0) == 1.0,
+                # A critical row can fail on priority or contract while still
+                # reaching the right queue. Only a wrong queue is a critical miss.
+                "critical_miss": (
+                    float(_col(row, "routing.is_critical") or 0.0) == 1.0 and not routing_ok
+                ),
                 "contract_violations": _col(row, "contract.violations") or "none",
             }
         )
@@ -188,6 +193,21 @@ def render_report(record: dict[str, Any]) -> str:
             f"| {check_result['metric']} | >= {check_result['min']:.2f} | {actual} | {mark} |"
         )
 
+    per_run = record.get("per_run_metrics") or []
+    if len(per_run) > 1:
+        lines += [
+            "",
+            f"Scored {len(per_run)} times; each gated value above is the worst of the runs.",
+            "",
+            "| Run | Routing | Critical recall | Priority | Schema |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        for i, m in enumerate(per_run, 1):
+            lines.append(
+                f"| {i} | {m['routing_accuracy']:.3f} | {m['critical_queue_recall']:.3f} "
+                f"| {m['priority_accuracy']:.3f} | {m['schema_validity']:.3f} |"
+            )
+
     failures = [c for c in record["checks"] if not c["passed"]]
     if failures:
         lines += ["", "## Why this version was blocked", ""]
@@ -204,7 +224,7 @@ def render_report(record: dict[str, Any]) -> str:
 
     rows = record["failing_rows"]
     if rows:
-        critical = [r for r in rows if r["is_critical"]]
+        critical = [r for r in rows if r.get("critical_miss")]
         if critical:
             lines += [
                 "## Critical-queue misses",
@@ -246,7 +266,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--env", default="acceptance", choices=["dev", "acceptance", "prod"])
     parser.add_argument("--dataset", default=None)
     parser.add_argument("--out-dir", default=None)
+    parser.add_argument(
+        "--repeats", type=int, default=1,
+        help="Score the golden set this many times and gate on the WORST value of "
+             "each metric. A real model is not perfectly deterministic even at "
+             "temperature 0, so a version should pass on its bad day, not its good one.",
+    )
     args = parser.parse_args(argv)
+    if args.repeats < 1:
+        parser.error("--repeats must be at least 1")
 
     manifest = load_manifest(args.manifest)
     agent = TriageAgent(manifest)
@@ -270,29 +298,51 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Fallback policy  : {'declared' if manifest.prompt.fallback else 'ABSENT'}")
     print(f"Backend          : {agent.backend_name}")
     print(f"Target env       : {args.env}")
+    print(f"Repeats          : {args.repeats}")
     print()
-
-    tickets = load_dataset(dataset_path)
-    predictions = agent.batch(tickets)
-    predictions_path = out_dir / "predictions.jsonl"
-    with predictions_path.open("w", encoding="utf-8") as fh:
-        for row in predictions:
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     from azure.ai.evaluation import evaluate
 
-    sdk_result = evaluate(
-        data=str(predictions_path),
-        evaluators=EVALUATORS,
-        evaluator_config=EVALUATOR_CONFIG,
-        evaluation_name=f"{manifest.release_id}-{args.env}",
-        output_path=str(out_dir / "sdk_results.json"),
-    )
+    tickets = load_dataset(dataset_path)
+    runs: list[dict[str, Any]] = []
+    for attempt in range(1, args.repeats + 1):
+        run_dir = out_dir if args.repeats == 1 else out_dir / f"run-{attempt}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        predictions = agent.batch(tickets)
+        predictions_path = run_dir / "predictions.jsonl"
+        with predictions_path.open("w", encoding="utf-8") as fh:
+            for row in predictions:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    rows = sdk_result.get("rows") or []
-    metrics = aggregate(rows)
+        sdk_result = evaluate(
+            data=str(predictions_path),
+            evaluators=EVALUATORS,
+            evaluator_config=EVALUATOR_CONFIG,
+            evaluation_name=f"{manifest.release_id}-{args.env}-run{attempt}",
+            output_path=str(run_dir / "sdk_results.json"),
+        )
+        run_rows = sdk_result.get("rows") or []
+        runs.append({"rows": run_rows, "metrics": aggregate(run_rows), "sdk": sdk_result})
+        if args.repeats > 1:
+            m = runs[-1]["metrics"]
+            print(f"  run {attempt}/{args.repeats}: routing {m['routing_accuracy']:.3f}  "
+                  f"critical recall {m['critical_queue_recall']:.3f}  "
+                  f"priority {m['priority_accuracy']:.3f}  schema {m['schema_validity']:.3f}")
+
+    # Gate on the worst value of every metric across runs.
+    gated = ("routing_accuracy", "priority_accuracy", "schema_validity", "critical_queue_recall")
+    metrics = dict(runs[0]["metrics"])
+    for name in gated:
+        metrics[name] = min(r["metrics"][name] for r in runs)
+    # Report the failing rows of the worst run, so the report explains the number.
+    worst = min(runs, key=lambda r: (r["metrics"]["critical_queue_recall"],
+                                     r["metrics"]["routing_accuracy"]))
+    rows = worst["rows"]
+    sdk_result = worst["sdk"]
     checks = check(metrics, thresholds)
     passed = all(c["passed"] for c in checks)
+    if args.repeats > 1:
+        print()
 
     record = {
         "passed": passed,
@@ -310,6 +360,10 @@ def main(argv: list[str] | None = None) -> int:
         "dataset": str(dataset_path.relative_to(REPO_ROOT)),
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "metrics": metrics,
+        "repeats": args.repeats,
+        "per_run_metrics": [
+            {k: r["metrics"][k] for k in gated} for r in runs
+        ],
         "checks": checks,
         "failing_rows": failing_rows(rows),
         "sdk_metrics": sdk_result.get("metrics", {}),
@@ -330,7 +384,7 @@ def main(argv: list[str] | None = None) -> int:
               f"{actual:>6}   {mark}")
     print("=" * width)
 
-    critical_misses = [r for r in record["failing_rows"] if r["is_critical"]]
+    critical_misses = [r for r in record["failing_rows"] if r.get("critical_miss")]
     if critical_misses:
         print()
         print(f"  {len(critical_misses)} critical-queue ticket(s) mis-routed:")

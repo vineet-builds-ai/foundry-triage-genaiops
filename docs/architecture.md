@@ -131,6 +131,60 @@ is a reviewed parameter change that re-runs the gate — which is the intent.
 
 ---
 
+## 7. Build the image once, promote it by digest
+
+**Decision.** CD builds the container image once per commit, pushes it to the
+registry, and passes the same `image@sha256:...` digest to dev, acceptance and
+production. The manifest and prompt are baked into the image, and
+`GET /version` reports the release id computed from those bytes.
+
+**Why.** Rebuilding per environment means production runs something
+acceptance never tested. A tag can be re-pointed; a digest cannot. And because
+the running service reports its own release id, every smoke test can prove
+which version is serving instead of assuming it.
+
+**Given up.** The image is now a second thing to promote alongside the
+infrastructure, and the registry becomes part of the release path.
+
+**Would change if.** The estate requires a private registry. Then the image
+goes to a shared Azure Container Registry and each container app pulls with
+its managed identity (`AcrPull`). GitHub Container Registry is used here
+because it needs no extra Azure resource or role assignment.
+
+---
+
+## 8. A real canary: new revisions start at 0%
+
+**Decision.** In production the deployment names the revision currently
+serving, so Container Apps creates the new revision with 0% traffic. The new
+revision is smoke-tested at its own address, then moved to 10%, watched, and
+only then to 100%.
+
+**Why.** Without an explicit traffic block Container Apps gives the newest
+revision 100% as soon as it is ready, which would turn the "canary" into a
+full release before the first check ran.
+
+**Given up.** Two revisions run side by side during a release, each holding
+production's minimum replicas.
+
+---
+
+## 9. Role assignments are bootstrapped, not deployed by the pipeline
+
+**Decision.** `deployRoleAssignments` defaults to on for a person's first
+deployment and is off in the pipeline. The pipeline identity needs only
+`Contributor` on its resource group.
+
+**Why.** Creating role assignments requires `roleAssignments/write`, which is
+the right to grant any access, including to oneself. Many tenants forbid
+granting it to automation. Access changes rarely; deployments happen
+constantly. Splitting them keeps the frequent path low-privilege.
+
+**Given up.** A change to the access model is a manual, privileged step
+rather than part of the release. That is arguably the point.
+
+---
+
 ## Where this deviates from the Microsoft baseline
 
 Built on the [baseline Microsoft Foundry chat reference
@@ -158,9 +212,11 @@ which is why older templates keep working.
 Stated plainly, because a client will find them anyway and it is better to
 have named them first.
 
-- **Never deployed.** Templates compile; nothing has been applied to a live
-  subscription. First deployment will surface quota, naming and policy
-  friction that no amount of compiling catches.
+- **Only dev has been deployed.** Acceptance and production need
+  platform-owned networking and a runner inside that network for their
+  checks. The first dev deployment surfaced a real defect that compiling had
+  not (parallel changes to the Foundry account failing with RequestConflict),
+  which is exactly why the first deployment is worth doing early.
 - **The golden set is synthetic.** 49 tickets written by hand. A real
   engagement starts by sampling production tickets and having the support team
   label them, which is a week of someone's time and the single highest-value
